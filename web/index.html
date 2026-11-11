@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status Agent Lab</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="logo">◇</span> Status Agent Lab</div>
+    <a class="new-chat" href="#/">＋ Câu hỏi mới</a>
+
+    <div class="side-label">Lịch sử chạy <span class="small" data-tip="Lưu trong bộ nhớ của server, mất khi tắt server.">ⓘ</span></div>
+    <nav class="run-list" id="run-list"></nav>
+
+    <div class="side-label">Eval</div>
+    <nav class="eval-links">
+      <a href="#/eval" data-nav="eval-run">▶ Chạy eval <span id="job-dot" class="job-dot hidden" title="Có eval đang chạy"></span></a>
+      <a href="#/eval/results" data-nav="eval-results">▤ Kết quả eval</a>
+      <a href="#/eval/compare" data-nav="eval-compare">⇄ So sánh before / after</a>
+    </nav>
+
+    <div class="side-foot">
+      <div id="envinfo" class="small"></div>
+      <button class="ghost" id="theme-btn" title="Đổi giao diện sáng / tối">◐ Giao diện: tự động</button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="ghost icon" id="menu-btn" aria-label="Mở menu">☰</button>
+      <div class="topbar-title" id="topbar-title">Câu hỏi mới</div>
+    </header>
+    <div class="view" id="view"></div>
+
+    <div class="composer-wrap" id="composer-wrap">
+      <form class="composer" id="composer">
+        <textarea id="q" rows="1" placeholder="Hỏi về trạng thái GitHub / Cloudflare…  (Enter để gửi, Shift+Enter xuống dòng)"></textarea>
+        <div class="composer-bar">
+          <button type="button" class="chip-btn" id="opts-btn" aria-haspopup="true">⚙ <span id="opts-summary"></span></button>
+          <button type="submit" class="send" id="send-btn" aria-label="Gửi">↑</button>
+        </div>
+        <div class="popover hidden" id="opts-pop">
+          <div class="pop-title">Tùy chọn lần chạy</div>
+          <label class="field">Provider
+            <select id="o-provider"></select>
+          </label>
+          <label class="field" id="o-model-row">Model
+            <input id="o-model" placeholder="MODEL từ env">
+          </label>
+          <div class="field" id="o-fake-row">
+            <span>Kịch bản giả <span class="term" data-tip="Fake provider không gọi model thật: mỗi phần tử trong kịch bản là một câu trả lời của 'model'. Không cần API key.">?</span></span>
+            <div class="row"><select id="o-preset"></select><button type="button" class="ghost" id="o-edit">Sửa…</button></div>
+          </div>
+          <div class="field"><span>Dữ liệu <span class="term" data-tip="snapshot: đọc dữ liệu đã chụp sẵn trong fixtures/ (ổn định, offline). live: gọi status API thật.">?</span></span>
+            <div class="seg" id="o-mode"><button type="button" data-v="snapshot">snapshot</button><button type="button" data-v="live">live</button></div>
+          </div>
+          <label class="field"><span>max_steps <span class="term" data-tip="Số lần gọi model tối đa. Hết mà chưa có câu trả lời cuối thì dừng với trạng thái max_steps.">?</span></span>
+            <input id="o-steps" type="number" min="1" max="50">
+          </label>
+          <label class="check"><input type="checkbox" id="o-fail"> Giả lập tool timeout (fail)</label>
+          <label class="check"><input type="checkbox" id="o-bonus"> Dùng BonusTools (bonus)</label>
+        </div>
+      </form>
+      <div class="composer-note small">Mỗi câu hỏi là một lần chạy <code>run_agent</code> độc lập; agent không nhớ câu trước.</div>
+    </div>
+  </main>
+</div>
+
+<dialog id="script-dlg">
+  <form method="dialog" class="dlg">
+    <div class="pop-title">Kịch bản fake provider</div>
+    <p class="small">Mỗi phần tử = một lần gọi model. <code>calls[].arguments</code> là object, hoặc chuỗi để thử JSON lỗi. <code>finish</code> mặc định là <code>tool_calls</code> nếu có calls, ngược lại <code>stop</code>. <code>usage</code> tùy ý (OpenAI hoặc Anthropic).</p>
+    <textarea id="script-text" rows="18" spellcheck="false"></textarea>
+    <div class="dlg-err small" id="script-err"></div>
+    <div class="row end"><button value="cancel" class="ghost">Huỷ</button><button value="ok" class="primary" id="script-save">Lưu</button></div>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>
