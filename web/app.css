@@ -234,3 +234,13 @@ th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover, th.sortable.on { color: var(--text); }
 th.sortable .arr { font-size: 10px; opacity: .45; }
 th.sortable.on .arr { opacity: 1; color: var(--accent); }
+.badge.ver { background: var(--tool-soft); color: var(--tool); font-family: var(--mono); font-weight: 600; }
+.vtag { flex: none; font: 11px var(--mono); color: var(--tool); background: var(--tool-soft); border-radius: 6px; padding: 0 5px; }
+.vs-header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 6px 0 4px; font-size: 16px; }
+.vs-header .vs { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 14px; font-family: var(--mono); font-size: 14px; }
+.vs-header .arrow { color: var(--faint); }
+.cfg-diff { margin-top: 8px; font-size: 13px; }
+.cfg-diff th, .cfg-diff td { padding: 4px 8px; color: inherit; border-color: currentColor; border-bottom-style: dotted; }
+.nondet { margin: -6px 0 14px; }
+.rerun .field { min-width: 0; max-width: 100%; }
+.rerun .field select { width: auto; min-width: 0; max-width: 100%; flex: 1; text-overflow: ellipsis; }

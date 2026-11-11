@@ -5,7 +5,9 @@ Chỉ bind 127.0.0.1. Không bao giờ trả API key qua API hay ghi vào log.
 """
 import argparse
 import importlib
+import importlib.util
 import json
+import linecache
 import os
 import re
 import subprocess
@@ -28,6 +30,126 @@ OUTPUT_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}\.json$')
 CASE_RE = re.compile(r'^[A-Za-z0-9_-]{1,20}$')
 STATIC = {'/app.js': 'text/javascript; charset=utf-8', '/app.css': 'text/css; charset=utf-8'}
 RUN_LOCK = threading.Lock()  # importlib.reload không thread-safe; chạy agent tuần tự.
+WIP = 'wip'  # "Bản đang sửa (working copy)"
+TAG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')  # tag dùng được làm tên thư mục .versions/<tag>
+VERSIONS_DIR = ROOT / '.versions'          # đã có trong .gitignore
+VERSION_INDEX = VERSIONS_DIR / 'index.json'  # file output -> version đã tạo ra nó
+
+
+class Conflict(Exception):
+    """File output đã tồn tại; UI phải hỏi người dùng trước khi ghi đè."""
+
+
+# ---------------------------------------------------------------- versions (git tag)
+
+def git(*args, check=True):
+    """Chạy git với list args (không qua shell)."""
+    proc = subprocess.run(['git', *args], cwd=str(ROOT), capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if check and proc.returncode != 0:
+        raise RuntimeError(f'git {args[0]} lỗi: {proc.stderr.strip()[:300]}')
+    return proc.stdout
+
+
+def list_versions():
+    """Các git tag (sắp theo version) + bản đang sửa."""
+    out = git('tag', '--list', '--sort=version:refname',
+              '--format=%(refname:short)%09%(*objectname:short)%09%(objectname:short)%09%(creatordate:short)%09%(contents:subject)', check=False)
+    tags = []
+    for line in out.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 5 or not parts[0]:
+            continue
+        name, peeled, obj, date, subject = parts[:5]
+        tags.append({'name': name, 'commit': peeled or obj, 'date': date, 'message': subject,
+                     'usable': bool(TAG_RE.match(name))})
+    return [{'name': WIP, 'label': 'Bản đang sửa (working copy)', 'message': 'agent.py hiện tại trong thư mục làm việc'}] + tags
+
+
+def resolve_version(version):
+    """Trả (tên, commit sha) cho tag hợp lệ; (WIP, None) cho bản đang sửa. Chỉ nhận tag có trong `git tag --list`."""
+    version = str(version or '').strip() or WIP
+    if version == WIP:
+        return WIP, None
+    names = set(git('tag', '--list').split())
+    if version not in names or not TAG_RE.match(version):
+        raise ValueError(f'Version không hợp lệ: {version!r} (phải là một tag trong git tag --list).')
+    sha = git('rev-parse', '--verify', '--quiet', f'refs/tags/{version}^{{commit}}').strip()
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError(f'Không resolve được tag {version}.')
+    return version, sha
+
+
+AGENT_CACHE = {}
+
+
+def load_agent(version):
+    """Module agent cho một version. WIP: reload agent.py hiện tại. Tag: nạp `git show <sha>:agent.py`
+    thành module riêng `agent_<tag>_<sha>`; không checkout, không ghi đè agent.py.
+    Lưu ý: các import bên trong (status_tools, providers…) vẫn là bản hiện tại."""
+    name, sha = resolve_version(version)
+    if name == WIP:
+        import agent
+        return importlib.reload(agent), name, None
+    if sha in AGENT_CACHE:
+        return AGENT_CACHE[sha], name, sha
+    source = git('show', f'{sha}:agent.py')
+    mod_name = f'agent_{re.sub(r"[^A-Za-z0-9_]", "_", name)}_{sha[:8]}'
+    filename = f'<git {name} {sha[:8]}>/agent.py'
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)  # traceback hiện được dòng code
+    spec = importlib.util.spec_from_loader(mod_name, loader=None, origin=filename)
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = filename
+    sys.modules[mod_name] = module
+    exec(compile(source, filename, 'exec'), module.__dict__)
+    AGENT_CACHE[sha] = module
+    return module, name, sha
+
+
+def ensure_worktree(name, sha):
+    """Tạo hoặc tái dùng worktree .versions/<tag> ở đúng commit của tag."""
+    path = VERSIONS_DIR / name
+    if path.exists():
+        head = subprocess.run(['git', '-C', str(path), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        if not head:
+            raise RuntimeError(f'{path} tồn tại nhưng không phải git worktree; hãy xoá thủ công.')
+        if head != sha:  # tag đã bị dời sang commit khác
+            subprocess.run(['git', '-C', str(path), 'checkout', '--detach', '--quiet', sha], check=True, capture_output=True)
+        return path
+    VERSIONS_DIR.mkdir(exist_ok=True)
+    git('worktree', 'prune')
+    git('worktree', 'add', '--detach', str(path), sha)
+    return path
+
+
+INDEX_LOCK = threading.Lock()
+
+
+def read_version_index():
+    try:
+        data = json.loads(VERSION_INDEX.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def remember_output_version(output, version, sha):
+    with INDEX_LOCK:
+        data = read_version_index()
+        data[output] = {'version': version, 'commit': sha, 'time': time.time()}
+        VERSIONS_DIR.mkdir(exist_ok=True)
+        VERSION_INDEX.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def file_version(name, index=None, tags=None):
+    """Version đã tạo file eval: ưu tiên index; nếu không có thì đoán theo tên eval_<tag>…json / eval_wip…json."""
+    index = read_version_index() if index is None else index
+    if name in index:
+        return index[name].get('version'), 'index'
+    tags = tags if tags is not None else [v['name'] for v in list_versions()]
+    for tag in sorted(tags, key=len, reverse=True):
+        if name == f'eval_{tag}.json' or name.startswith(f'eval_{tag}_'):
+            return tag, 'tên file'
+    return None, None
 
 
 def load_dotenv_file(path):
@@ -129,7 +251,7 @@ def run_summaries():
     for r in reversed(items):
         status = (r.get('result') or {}).get('status') if r.get('ok') else 'exception'
         out.append({'id': r['id'], 'created': r['created'], 'question': r['question'], 'status': status,
-                    'provider': (r.get('meta') or {}).get('provider')})
+                    'provider': (r.get('meta') or {}).get('provider'), 'version': (r.get('meta') or {}).get('version')})
     return out
 
 
@@ -150,11 +272,12 @@ def _run_agent(body):
         return {'ok': False, 'exception': 'ValueError: max_steps phải từ 1 đến 50.'}
 
     started = time.time()
-    meta = {'question': question, 'mode': mode, 'max_steps': max_steps, 'fail': fail, 'bonus': bonus}
+    meta = {'question': question, 'mode': mode, 'max_steps': max_steps, 'fail': fail, 'bonus': bonus,
+            'version': None}  # chỉ ghi version sau khi đã validate (tag có trong git tag --list)
     with RUN_LOCK:
         try:
-            import agent
-            agent = importlib.reload(agent)  # luôn lấy code agent.py mới nhất
+            agent, meta['version'], sha = load_agent(body.get('version'))  # WIP: luôn lấy agent.py mới nhất
+            meta['commit'] = sha[:8] if sha else None
             from status_tools import StatusTools
             if bonus:
                 from bonus.tools import BonusTools
@@ -192,7 +315,12 @@ def start_eval(body):
     output = str(body.get('output') or 'eval_results.json').strip()
     if not OUTPUT_RE.match(output):
         raise ValueError('Tên file output chỉ gồm chữ, số, _ . - và kết thúc bằng .json (không có thư mục).')
-    cmd = [sys.executable, '-u', str(ROOT / 'evals' / 'run_evals.py'), '--output', output]
+    version, sha = resolve_version(body.get('version'))
+    workdir = ROOT if version == WIP else ensure_worktree(version, sha)
+    target = ROOT / output  # luôn ghi về thư mục chính, kể cả khi chạy trong worktree
+    if target.exists() and not body.get('overwrite'):
+        raise Conflict(f'File {output} đã tồn tại. Xác nhận để ghi đè, hoặc đổi tên.')
+    cmd = [sys.executable, '-u', str(workdir / 'evals' / 'run_evals.py'), '--output', str(target)]
     case = str(body.get('case') or '').strip()
     if case:
         if not CASE_RE.match(case):
@@ -211,17 +339,19 @@ def start_eval(body):
         if body.get(key) not in (None, ''):
             cmd += [flag, str(int(body[key]))]
     settings = effective_eval_settings(body)
+    settings.update(version=version, commit=sha[:8] if sha else None)
     with JOBS_LOCK:
         if any(j['status'] == 'running' and j['output'] == output for j in JOBS.values()):
             raise ValueError(f'Đang có eval ghi vào {output}.')
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    proc = subprocess.Popen(cmd, cwd=str(workdir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding='utf-8', errors='replace', env=os.environ.copy())
     job = {'id': uuid.uuid4().hex[:8], 'output': output, 'case': case, 'bonus': bool(body.get('bonus')),
-           'args': [a for a in cmd[3:]], 'status': 'running', 'returncode': None,
+           'args': [output if a == str(target) else a for a in cmd[3:]], 'status': 'running', 'returncode': None,
            'started': time.time(), 'finished': None, 'log': [], 'proc': proc,
            'settings': settings, 'output_config': None, 'config_mismatch': []}
     with JOBS_LOCK:
         JOBS[job['id']] = job
+    remember_output_version(output, version, sha)
 
     def pump():
         for line in proc.stdout:
@@ -297,6 +427,7 @@ def stop_eval(job_id):
 
 def list_eval_files():
     files = []
+    index, tags = read_version_index(), [v['name'] for v in list_versions()]
     for path in sorted(ROOT.glob('*.json')):
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -306,7 +437,10 @@ def list_eval_files():
             files.append({'name': path.name, 'mtime': path.stat().st_mtime, 'cases': len(data['cases']),
                           'score': (data.get('summary') or {}).get('score_0_100'),
                           'scored': (data.get('summary') or {}).get('scored_cases'),
-                          'dataset': (data.get('config') or {}).get('dataset')})
+                          'dataset': (data.get('config') or {}).get('dataset'),
+                          'config': {k: (data.get('config') or {}).get(k) for k in
+                                     ('provider', 'model', 'judge_provider', 'judge_model', 'max_steps', 'dataset')},
+                          'version': file_version(path.name, index, tags)[0]})
     return files
 
 
@@ -381,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     jobs = [public_job(j) for j in JOBS.values()]
                 return self._send(200, sorted(jobs, key=lambda j: -j['started']))
+            if url.path == '/api/versions':
+                return self._send(200, list_versions())
             if url.path == '/api/evals':
                 return self._send(200, list_eval_files())
             if url.path == '/api/evals/file':
@@ -402,6 +538,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/eval/stop':
                 return self._send(200, stop_eval(body.get('id')))
             return self._send(404, {'error': 'Not found'})
+        except Conflict as exc:
+            return self._send(409, {'error': str(exc), 'exists': True})
         except Exception as exc:  # noqa: BLE001
             return self._send(400, {'error': redact(f'{type(exc).__name__}: {exc}'),
                                     'traceback': redact(traceback.format_exc())})

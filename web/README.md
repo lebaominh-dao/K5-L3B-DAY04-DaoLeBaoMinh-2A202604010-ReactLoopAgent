@@ -22,6 +22,7 @@ python3 web/server.py --port 8765
   - `max_steps`
   - `fail` (giả lập tool timeout)
   - `bonus` (dùng `BonusTools`)
+  - **version agent**: bản đang sửa (working copy) hoặc một git tag (`v0`, `v1`…), xem mục [Version agent](#version-agent-git-tag)
 - **Fake provider** không cần key. Agent nhận các câu trả lời "model" lấy từ một kịch bản JSON, giống `FakeProvider` trong `tests/test_lab.py`. Chọn kịch bản mẫu hoặc bấm **Sửa…** để tự viết. Có sẵn:
   - một tool
   - nhiều tool + incident
@@ -36,6 +37,7 @@ python3 web/server.py --port 8765
   - Tool lỗi (`ok: false`, `INVALID_ARGUMENTS`, timeout) có màu đỏ. `max_steps` và event lạ (ví dụ `validation_missing_source`) có màu vàng.
   - Câu trả lời render markdown đơn giản: in đậm, `code`, danh sách, link bấm được, bảng GFM (có căn lề; bảng rộng cuộn ngang trong khung riêng).
   - Badge trạng thái: `completed` xanh, `max_steps` vàng, `error` / `exception` đỏ. Exception hiện kèm traceback thu gọn.
+  - Badge `⎇ v0` / `⎇ working copy` cho biết câu trả lời đến từ version agent nào (sidebar cũng ghi tag cạnh mỗi lần chạy).
   - Dòng **"▦ … tokens · … lần gọi model · … tool call"**: bấm vào để xem bảng usage từng step. Bảng đọc được cả format OpenAI (`prompt_tokens` / `completion_tokens`) và Anthropic (`input_tokens` / `output_tokens`).
 - Rê chuột lên các thuật ngữ có gạch chấm (step, finish, tool call, max_steps…) để xem giải thích. Màn hình chào có bảng chú giải.
 - Sidebar trái là lịch sử các lần chạy trong phiên server. Lịch sử lưu trong bộ nhớ, mất khi tắt server.
@@ -45,10 +47,11 @@ python3 web/server.py --port 8765
 
 - **Chạy eval:** chạy `evals/run_evals.py` ở background.
   - Phạm vi: toàn bộ hoặc một case (`--case`), có thể thêm `--bonus`.
-  - Tên file output tự đặt, ví dụ `eval_before.json` / `eval_after.json`. File ghi ở thư mục gốc repo.
+  - Chọn **version agent**. Tên file mặc định là `eval_<tag>.json`, hoặc `eval_wip.json` với bản đang sửa; có thể tự đặt tên khác. File luôn ghi ở thư mục gốc repo.
+  - Nếu file output đã tồn tại, UI hỏi trước khi ghi đè; không bao giờ tự ghi đè.
   - Trong "Tùy chọn nâng cao" chỉnh được provider/model của agent, judge provider / judge model (để trống = dùng model agent), `max_steps`, `workers`.
   - Có trạng thái đang chạy / xong / lỗi, log, và nút dừng.
-  - Mỗi job hiện **model agent**, **model judge** và `max_steps` đúng như lúc khởi chạy (tính giống `run_evals.py`: tham số > biến môi trường > mặc định). Nếu không chọn judge, `run_evals.py` dùng chính model agent để chấm; UI ghi rõ "(mặc định = agent)". Khi job xong, cấu hình này được đối chiếu với `config` trong file output.
+  - Mỗi job hiện **version** (tag + commit), **model agent**, **model judge** và `max_steps` đúng như lúc khởi chạy (tính giống `run_evals.py`: tham số > biến môi trường > mặc định). Nếu không chọn judge, `run_evals.py` dùng chính model agent để chấm; UI ghi rõ "(mặc định = agent)". Khi job xong, cấu hình này được đối chiếu với `config` trong file output.
   - Eval gọi model thật nên cần key.
 - **Kết quả eval:**
   - Chọn file eval ở thư mục gốc hoặc mở file từ máy.
@@ -58,15 +61,38 @@ python3 web/server.py --port 8765
 - **So sánh before / after:**
   - Hai cột điểm và Δ tô màu theo từng case, cùng tổng số lần gọi model và token.
   - Bảng theo case mặc định xếp theo điểm **after** tăng dần (case lỗi / chưa chấm ở đầu). Bấm tiêu đề Before / After / Δ / Trạng thái để đổi; Δ tăng dần = case giảm điểm nhiều nhất lên trước.
-  - Bấm một case để xem hai hội thoại cạnh nhau.
+  - Bấm một case để xem hai hội thoại cạnh nhau (trái = before, phải = after; trên điện thoại xếp chồng). Mỗi cột có điểm, `grade.reason`, kiểm tra máy và hội thoại đầy đủ. Dòng đầu tóm tắt, ví dụ `v0: — (lỗi) → v1: 85`.
+  - Nút **"Chạy lại case này trên cả hai version"**: chạy `--case X` cho version A và B (mặc định là version đã tạo hai file), mỗi bên ghi file riêng `eval_<tag>_<case>_<thời gian>.json`, dùng cùng config với file đang xem. Xong thì có link mở kết quả.
+  - Nếu hai file có config khác nhau (`provider`, `model`, `judge_provider`, `judge_model`, `max_steps`, `dataset`), trang hiện cảnh báo kèm bảng khác biệt.
+  - LLM không deterministic: một lần chạy chưa đủ chứng minh cải tiến. Nên chạy lại vài lần trước khi kết luận.
+
+## Version agent (git tag)
+
+Mỗi version là một git tag, ví dụ `v0` (đã có), rồi `v1`, `v2`… do bạn tạo sau khi sửa `agent.py`:
+
+```bash
+git tag -a v1 -m "v1: thêm validation nguồn (Bài 4)"
+```
+
+- Danh sách version gồm "Bản đang sửa (working copy)" và các tag trong `git tag --list` (sắp theo version, kèm message của tag). Tải lại trang để thấy tag mới.
+- **Hỏi agent với một tag:** server đọc `git show <tag>:agent.py` và nạp thành module riêng (`agent_<tag>_<commit>`). Không checkout, không ghi đè `agent.py`. Lưu ý: các import bên trong (`status_tools`, `providers`, `bonus`…) vẫn là **bản hiện tại** trong thư mục làm việc, không phải bản ở tag.
+- **Chạy eval với một tag:** server tạo (hoặc tái dùng) worktree `.versions/<tag>` bằng `git worktree add --detach`, rồi chạy `evals/run_evals.py` với `cwd` là worktree đó. Vì vậy eval dùng toàn bộ code ở tag (agent, tools, evals). File kết quả vẫn ghi về thư mục chính. `.versions/` đã nằm trong `.gitignore`. Nếu tag bị dời sang commit khác, worktree tự chuyển theo.
+- Server ghi lại file eval nào được tạo bởi version nào trong `.versions/index.json`. File không có trong đó thì đoán theo tên (`eval_<tag>…json`).
+- Chỉ chấp nhận tên có trong `git tag --list` (chữ, số, `.`, `_`, `-`). Mọi lệnh git chạy bằng list args, không qua shell.
+- Dọn worktree khi không cần nữa:
+
+```bash
+git worktree remove .versions/v0
+```
 
 ## API (dùng nội bộ bởi UI)
 
 | Method | Path | Ý nghĩa |
 |---|---|---|
 | GET | `/api/config` | provider/model từ env, key nào có (true/false) |
-| POST | `/api/run` | chạy agent; body: `question, provider, model, mode, max_steps, fail, bonus, fake_script` |
+| GET | `/api/versions` | `wip` + các git tag (tên, commit, ngày, message) |
+| POST | `/api/run` | chạy agent; body: `question, version, provider, model, mode, max_steps, fail, bonus, fake_script` |
 | GET | `/api/runs`, `/api/runs/<id>` | lịch sử chạy trong phiên |
-| POST | `/api/eval/start`, `/api/eval/stop` | chạy / dừng eval |
+| POST | `/api/eval/start`, `/api/eval/stop` | chạy / dừng eval; `version` chọn tag. File output đã tồn tại → 409, gửi lại với `overwrite: true` sau khi người dùng xác nhận |
 | GET | `/api/eval/jobs` | trạng thái và log các job eval |
 | GET | `/api/evals`, `/api/evals/file?name=` | danh sách và nội dung file eval ở thư mục gốc |

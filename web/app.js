@@ -225,14 +225,29 @@ function usageLine(usage, trace) {
       <p class="small">${tip('usage')}: OpenAI-compatible dùng <code>prompt_tokens</code>/<code>completion_tokens</code>, Anthropic dùng <code>input_tokens</code>/<code>output_tokens</code>. Tổng = <code>total_tokens</code> hoặc input + output.</p>` : '<p class="small">Không có usage.</p>'}</div></details>`;
 }
 
+// ================================================================ versions (git tag)
+const WIP = 'wip';
+const verLabel = (v) => (!v || v === WIP ? 'working copy' : v);
+const verInfo = (v) => (state.versions || []).find((x) => x.name === (v || WIP));
+function verBadge(v) {
+  const info = verInfo(v);
+  const tipText = !v || v === WIP ? 'agent.py đang sửa trong thư mục làm việc' : `git tag ${v}${info?.commit ? ' · ' + info.commit : ''}${info?.message ? ' — ' + info.message : ''}`;
+  return `<span class="badge ver" title="${esc(tipText)}">⎇ ${esc(verLabel(v))}</span>`;
+}
+function versionOptions(selected) {
+  return (state.versions || [{name: WIP}]).filter((v) => v.usable !== false).map((v) =>
+    `<option value="${esc(v.name)}" ${v.name === (selected || WIP) ? 'selected' : ''}>${esc(v.name === WIP ? 'Bản đang sửa (working copy)' : `${v.name}${v.message ? ' — ' + v.message : ''}`)}</option>`).join('');
+}
+
 // ================================================================ conversation component
 const STATUS_TEXT = {completed: 'completed — hoàn thành', max_steps: 'max_steps — hết số bước', error: 'error — lỗi', exception: 'exception — agent crash'};
-function conversation({question, result, exception, traceback, meta, elapsed, pending}) {
+function conversation({question, result, exception, traceback, meta, elapsed, pending, version}) {
+  const ver = meta?.version ?? version;
   const user = `<div class="msg-user"><div class="bubble">${esc(question)}</div></div>`;
   if (pending) return user + `<div class="msg-agent"><div class="avatar">◇</div><div class="agent-body"><div class="typing"><span></span><span></span><span></span></div></div></div>`;
   let body = '';
   if (exception) {
-    body = `<div class="statusrow"><span class="badge exception">● ${STATUS_TEXT.exception}</span></div>
+    body = `<div class="statusrow"><span class="badge exception">● ${STATUS_TEXT.exception}</span>${ver ? verBadge(ver) : ''}</div>
       <div class="errcard"><b>${esc(exception)}</b>${traceback ? `<details><summary>Xem traceback</summary><pre>${esc(traceback)}</pre></details>` : ''}</div>`;
   } else if (isObj(result)) {
     const st = String(result.status ?? '—');
@@ -240,7 +255,7 @@ function conversation({question, result, exception, traceback, meta, elapsed, pe
     const extra = Object.keys(result).filter((k) => !known.has(k));
     body = stepsBlock(result.trace ?? []) +
       (result.answer ? `<div class="answer">${markdown(result.answer)}</div>` : `<div class="empty-answer">(Agent không có câu trả lời)</div>`) +
-      `<div class="statusrow"><span class="badge ${esc(st)}">● ${esc(STATUS_TEXT[st] || st)}</span>
+      `<div class="statusrow"><span class="badge ${esc(st)}">● ${esc(STATUS_TEXT[st] || st)}</span>${ver ? verBadge(ver) : ''}
         ${meta ? `<span class="small">${esc(metaText(meta))}${elapsed !== undefined ? ` · ${elapsed}s` : ''}</span>` : ''}</div>` +
       (result.error ? `<div class="errcard">${esc(pretty(result.error))}</div>` : '') +
       (extra.length ? `<details class="usage"><summary>＋ ${extra.length} trường khác trong kết quả</summary>${jsonBlock('', Object.fromEntries(extra.map((k) => [k, result[k]])))}</details>` : '') +
@@ -253,7 +268,7 @@ function conversation({question, result, exception, traceback, meta, elapsed, pe
 const metaText = (m) => [m.provider === 'fake' ? 'fake provider' : `${m.provider}/${m.model}`, m.mode, `max_steps ${m.max_steps}`, m.fail && 'fail', m.bonus && 'bonus'].filter(Boolean).join(' · ');
 
 // ================================================================ app state
-const state = {config: null, runs: [], opts: null, pending: null, jobs: [], evalFiles: [], local: {}};
+const state = {config: null, versions: null, rerun: null, runs: [], opts: null, pending: null, jobs: [], evalFiles: [], local: {}};
 const view = $('#view');
 const setTitle = (t) => { $('#topbar-title').textContent = t; document.title = `${t} · Status Agent Lab`; };
 const showComposer = (on) => $('#composer-wrap').classList.toggle('hidden', !on);
@@ -287,16 +302,18 @@ const PRESETS = {
   'Lặp mãi (chạm max_steps)': Array.from({length: 8}, (_, i) => ({calls: [{name: 'get_status', arguments: {provider: i % 2 ? 'cloudflare' : 'github'}}], usage: U(400 + i * 300, 20)})),
 };
 function defaultOpts() {
-  return {provider: '', model: '', mode: 'snapshot', max_steps: 6, fail: false, bonus: false, preset: Object.keys(PRESETS)[0], script: null};
+  return {version: WIP, provider: '', model: '', mode: 'snapshot', max_steps: 6, fail: false, bonus: false, preset: Object.keys(PRESETS)[0], script: null};
 }
 function saveOpts() { store.set('sal.opts', state.opts); renderOptsSummary(); }
 function renderOptsSummary() {
   const o = state.opts;
   const prov = o.provider === 'fake' ? `fake: ${o.script ? 'tự sửa' : o.preset}` : (o.provider || `env (${state.config?.provider || '?'})`);
-  $('#opts-summary').textContent = [prov, o.mode, `max_steps ${o.max_steps}`, o.fail && 'fail', o.bonus && 'bonus'].filter(Boolean).join(' · ');
+  $('#opts-summary').textContent = [o.version && o.version !== WIP && `⎇ ${o.version}`, prov, o.mode, `max_steps ${o.max_steps}`, o.fail && 'fail', o.bonus && 'bonus'].filter(Boolean).join(' · ');
 }
 function syncOptsForm() {
   const o = state.opts;
+  if (!verInfo(o.version)) o.version = WIP;  // tag đã bị xoá
+  $('#o-version').value = o.version;
   $('#o-provider').value = o.provider;
   $('#o-model').value = o.model;
   $('#o-steps').value = o.max_steps;
@@ -310,6 +327,7 @@ function setupOptions() {
   const cfg = state.config;
   $('#o-provider').innerHTML = `<option value="fake">fake provider — không cần key</option><option value="">env (${esc(cfg.provider || 'openai')})</option>` +
     cfg.providers.map((p) => `<option value="${p}">${p}${cfg.keys_present[p.toUpperCase() + '_API_KEY'] ? '' : ' (thiếu key)'}</option>`).join('');
+  $('#o-version').innerHTML = versionOptions(WIP);
   $('#o-preset').innerHTML = Object.keys(PRESETS).map((k) => `<option>${esc(k)}</option>`).join('') + '<option value="__custom">(kịch bản tự sửa)</option>';
   state.opts = Object.assign(defaultOpts(), store.get('sal.opts', {}));
   const hasKey = Object.values(cfg.keys_present).some(Boolean);
@@ -318,6 +336,7 @@ function setupOptions() {
 
   $('#opts-btn').addEventListener('click', (e) => { e.stopPropagation(); $('#opts-pop').classList.toggle('hidden'); });
   document.addEventListener('click', (e) => { if (!$('#opts-pop').contains(e.target) && e.target !== $('#opts-btn')) $('#opts-pop').classList.add('hidden'); });
+  $('#o-version').addEventListener('change', (e) => { state.opts.version = e.target.value; saveOpts(); });
   $('#o-provider').addEventListener('change', (e) => { state.opts.provider = e.target.value; syncOptsForm(); saveOpts(); });
   $('#o-model').addEventListener('input', (e) => { state.opts.model = e.target.value.trim(); saveOpts(); });
   $('#o-steps').addEventListener('input', (e) => { state.opts.max_steps = Math.max(1, Math.min(50, Number(e.target.value) || 6)); saveOpts(); });
@@ -356,7 +375,7 @@ async function ask(question) {
   question = String(question || '').trim();
   if (!question || (state.pending && !state.pending.error)) return;
   const o = state.opts;
-  const body = {question, mode: o.mode, max_steps: o.max_steps, fail: o.fail, bonus: o.bonus, provider: o.provider, model: o.model};
+  const body = {question, version: o.version || WIP, mode: o.mode, max_steps: o.max_steps, fail: o.fail, bonus: o.bonus, provider: o.provider, model: o.model};
   if (o.provider === 'fake') body.fake_script = currentScript();
   q.value = ''; autoGrow();
   $('#opts-pop').classList.add('hidden');
@@ -385,7 +404,7 @@ async function loadRuns() {
 function renderSidebar() {
   const cur = location.hash;
   $('#run-list').innerHTML = state.runs.length ? state.runs.map((r) =>
-    `<a href="#/run/${esc(r.id)}" class="${cur === '#/run/' + r.id ? 'active' : ''}" title="${esc(r.question)}"><span class="dot ${esc(r.status)}"></span><span class="t">${esc(r.question)}</span></a>`).join('')
+    `<a href="#/run/${esc(r.id)}" class="${cur === '#/run/' + r.id ? 'active' : ''}" title="${esc(r.question)}"><span class="dot ${esc(r.status)}"></span><span class="t">${esc(r.question)}</span>${r.version && r.version !== WIP ? `<span class="vtag">${esc(r.version)}</span>` : ''}</a>`).join('')
     : '<div class="small empty">Chưa có lần chạy nào.</div>';
   const section = cur.startsWith('#/eval/results') ? 'eval-results' : cur.startsWith('#/eval/compare') ? 'eval-compare' : cur.startsWith('#/eval') ? 'eval-run' : '';
   $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === section));
@@ -450,6 +469,15 @@ async function pageRun(id) {
 }
 
 // ---------------------------------------------------------------- eval: run
+// Không ghi đè file eval có sẵn khi chưa hỏi: server trả 409, UI hỏi rồi gửi lại với overwrite.
+async function startEval(body) {
+  try { return await api('/api/eval/start', body); }
+  catch (err) {
+    if (err.data?.exists && confirm(`${err.message}\n\nGhi đè file ${body.output}?`)) return api('/api/eval/start', {...body, overwrite: true});
+    throw err;
+  }
+}
+const defaultOutput = (v) => `eval_${v || WIP}.json`;
 let jobTimer = null;
 async function loadJobs() {
   try { state.jobs = await api('/api/eval/jobs'); } catch (e) { /* giữ nguyên */ }
@@ -473,6 +501,7 @@ function jobSettings(j) {
       : '<span class="note ok">✓ khớp config trong file output</span>';
   }
   return `<div class="job-models">
+    <span>Version: ${verBadge(st.version)}${st.commit ? ` <span class="note" style="color:inherit">${esc(st.commit)}</span>` : ''}</span>
     <span>Agent: <b>${m(st.provider, st.model)}</b></span>
     <span>Judge: <b>${m(st.judge_provider, st.judge_model)}</b>${judgeNote}</span>
     <span>max_steps: <b>${esc(st.max_steps)}</b>${st.max_steps_default ? ' <span class="note">(mặc định)</span>' : ''}</span>
@@ -508,7 +537,8 @@ function pageEvalRun() {
     <p class="lead">Chạy <code>evals/run_evals.py</code> ở background rồi chấm bằng judge model. Eval gọi model thật nên cần API key (đọc từ env / <code>.env</code>).</p>
     <form class="card" id="eval-form">
       <div class="form-grid">
-        <label class="field">Tên file kết quả <input id="e-output" value="eval_before.json"></label>
+        <label class="field"><span>Version agent <span class="term" data-tip="Tag: chạy evals/run_evals.py trong worktree .versions/&lt;tag&gt; (git worktree add --detach), không đụng thư mục làm việc. File kết quả vẫn ghi về thư mục chính.">?</span></span><select id="e-version">${versionOptions(WIP)}</select></label>
+        <label class="field">Tên file kết quả <input id="e-output" value="${esc(defaultOutput(WIP))}"></label>
         <div class="field"><span>Phạm vi</span>
           <div class="seg" id="e-scope"><button type="button" data-v="full" class="on">Toàn bộ</button><button type="button" data-v="case">Một case</button></div></div>
         <label class="field hidden" id="e-case-row">Case ID <input id="e-case" placeholder="vd. E2, H1"></label>
@@ -527,18 +557,20 @@ function pageEvalRun() {
       <div class="row" style="margin-top:14px"><button class="primary" id="e-start">▶ Bắt đầu</button><span class="small" id="e-msg"></span></div>
     </form>
     <h3 style="margin:22px 0 10px">Các job trong phiên</h3><div id="jobs"></div></div>`;
-  let scope = 'full';
+  let scope = 'full', outputTouched = false;
+  $('#e-output').addEventListener('input', () => { outputTouched = true; });
+  $('#e-version').addEventListener('change', (e) => { if (!outputTouched) $('#e-output').value = defaultOutput(e.target.value); });
   $$('#e-scope button').forEach((b) => b.addEventListener('click', () => {
     scope = b.dataset.v; $$('#e-scope button').forEach((x) => x.classList.toggle('on', x === b));
     $('#e-case-row').classList.toggle('hidden', scope !== 'case');
   }));
   $('#eval-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const body = {output: $('#e-output').value.trim(), case: scope === 'case' ? $('#e-case').value.trim() : '', bonus: $('#e-bonus').checked,
+    const body = {version: $('#e-version').value, output: $('#e-output').value.trim(), case: scope === 'case' ? $('#e-case').value.trim() : '', bonus: $('#e-bonus').checked,
       provider: $('#e-provider').value, model: $('#e-model').value.trim(), judge_provider: $('#e-jprovider').value, judge_model: $('#e-jmodel').value.trim(),
       max_steps: $('#e-steps').value, workers: $('#e-workers').value};
     if (scope === 'case' && !body.case) { $('#e-msg').textContent = 'Nhập case ID.'; return; }
-    try { const j = await api('/api/eval/start', body); $('#e-msg').textContent = `Đã bắt đầu → ${j.output}`; await loadJobs(); renderJobs(); }
+    try { const j = await startEval(body); $('#e-msg').textContent = `Đã bắt đầu → ${j.output}`; await loadJobs(); renderJobs(); }
     catch (err) { $('#e-msg').innerHTML = `<span class="badge error">lỗi</span> ${esc(err.message)}`; }
   });
   renderJobs(); loadJobs().then(renderJobs);
@@ -552,7 +584,7 @@ async function getEval(name) {
   return api('/api/evals/file?name=' + encodeURIComponent(name));
 }
 function fileOptions(selected, placeholder) {
-  const label = (n) => { const f = state.evalFiles.find((x) => x.name === n); return f ? `${n} — ${f.cases} case · ${f.score === null || f.score === undefined ? `chưa có điểm (${f.scored ?? '?'}/${f.cases} đã chấm)` : 'điểm ' + f.score}` : n; };
+  const label = (n) => { const f = state.evalFiles.find((x) => x.name === n); return f ? `${f.version ? '⎇ ' + verLabel(f.version) + ' · ' : ''}${n} — ${f.cases} case · ${f.score === null || f.score === undefined ? `chưa có điểm (${f.scored ?? '?'}/${f.cases} đã chấm)` : 'điểm ' + f.score}` : n; };
   return `<option value="">${esc(placeholder)}</option>` + allFileNames().map((n) => `<option value="${esc(n)}" ${n === selected ? 'selected' : ''}>${esc(label(n))}</option>`).join('');
 }
 async function readUploads(files) {
@@ -781,13 +813,20 @@ async function pageCompare(a, b, caseId) {
   if (my !== routeSeq) return;
   const ca = Array.isArray(A1?.cases) ? A1.cases : [], cb = Array.isArray(B1?.cases) ? B1.cases : [];
   const find = (arr, id) => arr.find((c) => String(c.id) === String(id));
+  const va = fileVersion(a), vb = fileVersion(b);
+  const sideName = (v, n, fallback) => (v ? verLabel(v) : fallback);
   if (caseId) {
     const x = find(ca, caseId), y = find(cb, caseId);
-    const col = (c, n, label) => `<div><div class="col-title">${label} · ${esc(n)}</div>${c ? gradeCard(c) + caseConv(c) : '<div class="card small">Không có case này.</div>'}</div>`;
+    const col = (c, n, v, label) => `<div><div class="col-title">${label} · ${v ? verBadge(v) + ' ' : ''}<code>${esc(n)}</code></div>${c ? gradeCard(c) + conversation({question: c.question, result: c.result, version: v || undefined}) : '<div class="card small">Không có case này.</div>'}</div>`;
     setTitle(`So sánh ${caseId}`);
     view.innerHTML = `<div class="wide"><a class="back" href="#/eval/compare/${enc(a)}/${enc(b)}">← Quay lại bảng so sánh</a>
-      <h2 class="page">Case ${esc(caseId)} ${deltaHtml(x?.grade?.score, y?.grade?.score)}</h2><p class="lead">${esc((x || y)?.question || '')}</p>
-      <div class="two-col">${col(x, a, 'Before')}${col(y, b, 'After')}</div></div>`;
+      <h2 class="page">Case ${esc(caseId)}</h2>
+      <div class="vs-header"><span class="vs">${esc(sideName(va, a, 'Before'))}: ${caseScoreText(x)}</span><span class="arrow">→</span><span class="vs">${esc(sideName(vb, b, 'After'))}: ${caseScoreText(y)}</span>${deltaHtml(x?.grade?.score, y?.grade?.score)}</div>
+      <p class="lead">${esc((x || y)?.question || '')}</p>
+      ${configWarning(a, A1.config, b, B1.config)}${NONDET_NOTE}
+      ${rerunPanel(caseId, va, vb, rerunConfig(A1.config || B1.config), `${a}|${b}`)}
+      <div class="two-col">${col(x, a, va, 'Before')}${col(y, b, vb, 'After')}</div></div>`;
+    bindRerun(caseId, rerunConfig(A1.config || B1.config), `${a}|${b}`);
     return;
   }
   const ids = [...new Set([...ca.map((c) => String(c.id)), ...cb.map((c) => String(c.id))])];
@@ -799,12 +838,13 @@ async function pageCompare(a, b, caseId) {
     ['Case đã chấm', `${sa.scored_cases ?? '—'}/${sa.total_cases ?? ca.length}`, `${sb.scored_cases ?? '—'}/${sb.total_cases ?? cb.length}`, false, true],
     ['Lần gọi model', calls(ca), calls(cb)], ['Token agent', tot(ca), tot(cb)]];
   view.innerHTML = `<div class="wide"><h2 class="page">So sánh before / after</h2><p class="lead">Δ dương (xanh) là tốt hơn về điểm. Token và số lần gọi model chỉ để tham khảo chi phí.</p>${picker}
-    <div class="card"><h3>Tổng quan</h3><div class="tbl-wrap"><table><thead><tr><th>Chỉ số</th><th class="num">Before</th><th class="num">After</th><th class="num">Δ</th></tr></thead>
+    <div class="card"><h3>Tổng quan</h3><div class="tbl-wrap"><table><thead><tr><th>Chỉ số</th><th class="num">Before${va ? ' · ' + esc(verLabel(va)) : ''}</th><th class="num">After${vb ? ' · ' + esc(verLabel(vb)) : ''}</th><th class="num">Δ</th></tr></thead>
       <tbody>${summaryRows.map(([l, x, y, isScore, isText]) => {
         const cell = (v) => (isScore ? (v === null ? '<span class="small">chưa có</span>' : scorePill(v)) : isText ? esc(v) : num(v));
         return `<tr><td>${l}</td><td class="num">${cell(x)}</td><td class="num">${cell(y)}</td><td class="num">${isText ? '' : deltaHtml(x, y, !isScore)}</td></tr>`;
       }).join('')}</tbody></table></div>
       ${incompleteNote(an(a, sa, ca), an(b, sb, cb))}</div>
+    ${configWarning(a, A1.config, b, B1.config)}${NONDET_NOTE}
     <div class="card"><h3>Từng case <span class="small">— bấm để xem hai hội thoại cạnh nhau · bấm tiêu đề cột để sắp xếp</span></h3><div class="tbl-wrap" id="cmp-table"></div></div></div>`;
   bind();
   renderCompareTable(ids.map((id, idx) => ({id, idx, x: find(ca, id), y: find(cb, id)})), a, b);
@@ -826,6 +866,86 @@ function renderCompareTable(rows0, a, b) {
   $$('tr[data-case]', box).forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/eval/compare/${enc(a)}/${enc(b)}/${enc(tr.dataset.case)}`; }));
 }
 const an = (name, s, cases) => ({name, s, cases});
+const fileVersion = (name) => state.evalFiles.find((f) => f.name === name)?.version || null;
+function caseScoreText(c) {
+  if (!c) return '<span class="small">không có case</span>';
+  const rs = c.result?.status;
+  if (isUnscored(c)) return `<b>—</b> <span class="small">(${rs === 'error' ? 'lỗi' : 'chưa chấm'})</span>`;
+  return `<b>${esc(c.grade.score)}</b>${rs && rs !== 'completed' ? ` <span class="small">(${esc(rs)})</span>` : ''}`;
+}
+const CONFIG_KEYS = ['provider', 'model', 'judge_provider', 'judge_model', 'max_steps', 'dataset'];
+function configWarning(an, ac, bn, bc) {
+  if (!isObj(ac) || !isObj(bc)) return '';
+  const diff = CONFIG_KEYS.filter((k) => String(ac[k] ?? '') !== String(bc[k] ?? ''));
+  if (!diff.length) return '';
+  return `<div class="warncard"><b>⚠ Hai file chạy với config khác nhau — chênh lệch điểm có thể do config chứ không do agent.</b>
+    <div class="tbl-wrap"><table class="cfg-diff"><thead><tr><th>Config</th><th>${esc(an)}</th><th>${esc(bn)}</th></tr></thead>
+    <tbody>${diff.map((k) => `<tr><td><code>${esc(k)}</code></td><td>${esc(ac[k] ?? '—')}</td><td>${esc(bc[k] ?? '—')}</td></tr>`).join('')}</tbody></table></div></div>`;
+}
+const NONDET_NOTE = '<p class="small nondet">ⓘ LLM không deterministic: cùng code, cùng case vẫn có thể ra điểm khác nhau giữa các lần chạy. Một lần chạy chưa đủ chứng minh cải tiến — nên chạy lại vài lần trước khi kết luận.</p>';
+
+// ---- chạy lại một case trên cả hai version
+// Config dùng để chạy lại: lấy từ file eval, bỏ provider không hợp lệ cho run_evals.py (vd. 'fake') cùng model của nó.
+function rerunConfig(cfg) {
+  const out = {};
+  if (!isObj(cfg)) return out;
+  const ok = (p) => (state.config?.providers || []).includes(p);
+  if (ok(cfg.provider)) { out.provider = cfg.provider; if (cfg.model) out.model = cfg.model; }
+  if (ok(cfg.judge_provider)) { out.judge_provider = cfg.judge_provider; if (cfg.judge_model) out.judge_model = cfg.judge_model; }
+  if (cfg.max_steps != null) out.max_steps = cfg.max_steps;
+  if (cfg.dataset === 'bonus') out.bonus = true;
+  return out;
+}
+function rerunPanel(caseId, va, vb, cfg, pair) {
+  const r = state.rerun && state.rerun.case === caseId && state.rerun.pair === pair ? state.rerun : null;
+  return `<div class="card rerun"><div class="row">
+      <b>Chạy lại case ${esc(caseId)} trên cả hai version</b>
+      <label class="field" style="flex-direction:row;align-items:center">A <select id="rr-a">${versionOptions(va || WIP)}</select></label>
+      <label class="field" style="flex-direction:row;align-items:center">B <select id="rr-b">${versionOptions(vb || WIP)}</select></label>
+      <button class="primary" id="rr-go" ${r && r.sides.some((s) => s.status === 'running') ? 'disabled' : ''}>▶ Chạy lại case này trên cả hai version</button></div>
+    <div class="small" style="margin-top:6px">Dùng cùng config cho cả hai lần (${esc(CONFIG_KEYS.filter((k) => k !== 'dataset').map((k) => `${k}=${cfg[k] ?? 'env'}`).join(' · '))}${cfg.bonus ? ' · bonus' : ''}). Gọi model thật nên cần API key; mỗi version ghi ra file riêng.</div>
+    <div id="rr-status">${rerunStatus(r)}</div></div>`;
+}
+function rerunStatus(r) {
+  if (!r) return '';
+  const rows = r.sides.map((s) => `<div class="row" style="margin-top:6px"><span class="badge ${esc(s.status)}">● ${esc(JOB_TEXT[s.status] || s.status)}</span>${verBadge(s.version)}<code>${esc(s.output)}</code>${s.error ? `<span class="small" style="color:var(--bad)">${esc(s.error)}</span>` : ''}</div>`).join('');
+  const done = r.sides.every((s) => s.status === 'done' || s.status === 'failed');
+  const ok = r.sides.every((s) => s.status === 'done' || (s.status === 'failed' && s.wrote));
+  return rows + (done ? (ok ? `<div class="row" style="margin-top:8px"><a class="primary" style="text-decoration:none" href="#/eval/compare/${enc(r.sides[0].output)}/${enc(r.sides[1].output)}/${enc(r.case)}">Xem kết quả chạy lại →</a></div>`
+    : '<div class="small" style="margin-top:6px">Có job không ghi được file kết quả — xem log ở trang “Chạy eval”.</div>') : '');
+}
+function bindRerun(caseId, cfg, pair) {
+  const btn = $('#rr-go');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const ts = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const versions = [$('#rr-a').value, $('#rr-b').value];
+    const base = {...cfg, case: caseId};
+    const sides = versions.map((v, i) => ({version: v, output: `eval_${v}_${caseId}_${ts}${versions[0] === versions[1] ? '_' + 'ab'[i] : ''}.json`, status: 'running'}));
+    state.rerun = {case: caseId, pair, sides};
+    btn.disabled = true;
+    for (const side of sides) {
+      try { const j = await startEval({...base, version: side.version, output: side.output}); side.job = j.id; }
+      catch (err) { side.status = 'failed'; side.error = err.message; }
+    }
+    pollRerun();
+  });
+}
+let rerunTimer = null;
+async function pollRerun() {
+  clearTimeout(rerunTimer);
+  const r = state.rerun;
+  if (!r) return;
+  await loadJobs();
+  for (const s of r.sides) {
+    const j = state.jobs.find((x) => x.id === s.job);
+    if (j) { s.status = j.status; s.wrote = isObj(j.output_config); }
+  }
+  const box = $('#rr-status');
+  if (box) box.innerHTML = rerunStatus(r);
+  if (r.sides.some((s) => s.status === 'running')) rerunTimer = setTimeout(pollRerun, 2000);
+  else { const b = $('#rr-go'); if (b) b.disabled = false; loadEvalFiles(); }
+}
 function incompleteNote(...files) {
   const bad = files.filter((f) => fullScore(f.s) === null);
   if (!bad.length) return '';
@@ -868,6 +988,8 @@ window.addEventListener('hashchange', route);
   catch (e) { state.config = {provider: '', model: '', providers: [], keys_present: {}}; }
   const keys = Object.entries(state.config.keys_present).filter(([, v]) => v).map(([k]) => k.replace('_API_KEY', '').toLowerCase());
   $('#envinfo').innerHTML = `env: <b>${esc(state.config.provider || '—')}</b> / ${esc(state.config.model || '—')}<br>key: ${esc(keys.join(', ') || 'không có — dùng fake provider')}`;
+  try { state.versions = await api('/api/versions'); }
+  catch (e) { state.versions = [{name: WIP, label: 'Bản đang sửa (working copy)'}]; }
   setupOptions();
   await Promise.all([loadRuns(), loadJobs()]);
   route();
