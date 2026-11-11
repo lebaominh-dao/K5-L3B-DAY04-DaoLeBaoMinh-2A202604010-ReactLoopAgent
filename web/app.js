@@ -132,6 +132,10 @@ function resultText(r) {
   if (Array.isArray(r.updates)) parts.push(`${r.updates.length}${r.updates_total ? '/' + r.updates_total : ''} update`);
   if (r.next_offset !== undefined && r.next_offset !== null) parts.push(`còn tiếp (next_offset ${r.next_offset})`);
   if (!parts.length) parts.push(`${Object.keys(r).length} trường`);
+  // Trường do scenario chèn vào (prompt injection / dữ liệu nhiễu): báo ngay trên dòng tool.
+  const injected = ['external_notice', 'context_note', 'distractors'].filter((k) => k in r);
+  if (Array.isArray(r.updates) && r.updates.some((u) => isObj(u) && u.status === 'untrusted')) injected.push('update untrusted');
+  if (injected.length) return {text: `${parts.join(' · ')} · ⚠ có ${injected.map((k) => (k === 'distractors' && Array.isArray(r[k]) ? `${r[k].length} distractors` : k)).join(', ')}`, level: 'warn'};
   return {text: parts.join(' · '), level: ''};
 }
 function jsonBlock(label, v) { return `<div class="lbl">${esc(label)}</div><pre>${esc(pretty(v))}</pre>`; }
@@ -239,15 +243,37 @@ function versionOptions(selected) {
     `<option value="${esc(v.name)}" ${v.name === (selected || WIP) ? 'selected' : ''}>${esc(v.name === WIP ? 'Bản đang sửa (working copy)' : `${v.name}${v.message ? ' — ' + v.message : ''}`)}</option>`).join('');
 }
 
+// ================================================================ scenarios + case eval
+const scnList = (bonus) => (state.scenarios || {})[bonus ? 'bonus' : 'core'] || [{name: 'normal', desc: ''}];
+const scnDesc = (name, bonus) => scnList(bonus).find((x) => x.name === name)?.desc || '';
+function scnBadge(name, bonus) {
+  if (!name) return '';
+  return `<span class="badge scn ${name === 'normal' ? 'plain' : ''}" title="${esc(`${bonus ? 'Bonus · ' : ''}${name}: ${scnDesc(name, bonus)}`)}">⚑ ${esc(name)}</span>`;
+}
+async function loadCases(dataset) {
+  state.cases = state.cases || {};
+  if (!state.cases[dataset]) {
+    try { state.cases[dataset] = await api('/api/cases?dataset=' + dataset); } catch (e) { state.cases[dataset] = []; }
+  }
+  return state.cases[dataset];
+}
+const findCase = (dataset, id) => ((state.cases || {})[dataset] || []).find((c) => c.id === id);
+function caseRefCard(c, closable) {
+  return `<div class="case-ref-card"><div class="row"><b>Case ${esc(c.id)}</b>${scnBadge(c.scenario, /^B/.test(c.id))}${c.fail ? '<span class="badge max_steps">fail</span>' : ''}
+      <span class="small" style="flex:1">${closable ? 'đã điền sẵn câu hỏi, scenario và fail' : ''}</span>${closable ? '<button type="button" class="ghost icon-x" id="case-ref-x" title="Bỏ liên kết case">×</button>' : ''}</div>
+    <details><summary class="small">Expected — chỉ hiển thị để đối chiếu, không gửi cho agent</summary><p class="small">${esc(c.expected || '')}</p></details></div>`;
+}
+
 // ================================================================ conversation component
 const STATUS_TEXT = {completed: 'completed — hoàn thành', max_steps: 'max_steps — hết số bước', error: 'error — lỗi', exception: 'exception — agent crash'};
 function conversation({question, result, exception, traceback, meta, elapsed, pending, version}) {
   const ver = meta?.version ?? version;
+  const tags = (ver ? verBadge(ver) : '') + (meta?.scenario ? scnBadge(meta.scenario, meta.bonus) : '');
   const user = `<div class="msg-user"><div class="bubble">${esc(question)}</div></div>`;
   if (pending) return user + `<div class="msg-agent"><div class="avatar">◇</div><div class="agent-body"><div class="typing"><span></span><span></span><span></span></div></div></div>`;
   let body = '';
   if (exception) {
-    body = `<div class="statusrow"><span class="badge exception">● ${STATUS_TEXT.exception}</span>${ver ? verBadge(ver) : ''}</div>
+    body = `<div class="statusrow"><span class="badge exception">● ${STATUS_TEXT.exception}</span>${tags}</div>
       <div class="errcard"><b>${esc(exception)}</b>${traceback ? `<details><summary>Xem traceback</summary><pre>${esc(traceback)}</pre></details>` : ''}</div>`;
   } else if (isObj(result)) {
     const st = String(result.status ?? '—');
@@ -255,7 +281,7 @@ function conversation({question, result, exception, traceback, meta, elapsed, pe
     const extra = Object.keys(result).filter((k) => !known.has(k));
     body = stepsBlock(result.trace ?? []) +
       (result.answer ? `<div class="answer">${markdown(result.answer)}</div>` : `<div class="empty-answer">(Agent không có câu trả lời)</div>`) +
-      `<div class="statusrow"><span class="badge ${esc(st)}">● ${esc(STATUS_TEXT[st] || st)}</span>${ver ? verBadge(ver) : ''}
+      `<div class="statusrow"><span class="badge ${esc(st)}">● ${esc(STATUS_TEXT[st] || st)}</span>${tags}
         ${meta ? `<span class="small">${esc(metaText(meta))}${elapsed !== undefined ? ` · ${elapsed}s` : ''}</span>` : ''}</div>` +
       (result.error ? `<div class="errcard">${esc(pretty(result.error))}</div>` : '') +
       (extra.length ? `<details class="usage"><summary>＋ ${extra.length} trường khác trong kết quả</summary>${jsonBlock('', Object.fromEntries(extra.map((k) => [k, result[k]])))}</details>` : '') +
@@ -265,7 +291,7 @@ function conversation({question, result, exception, traceback, meta, elapsed, pe
   }
   return user + `<div class="msg-agent"><div class="avatar">◇</div><div class="agent-body">${body}</div></div>`;
 }
-const metaText = (m) => [m.provider === 'fake' ? 'fake provider' : `${m.provider}/${m.model}`, m.mode, `max_steps ${m.max_steps}`, m.fail && 'fail', m.bonus && 'bonus'].filter(Boolean).join(' · ');
+const metaText = (m) => [m.provider === 'fake' ? 'fake provider' : `${m.provider}/${m.model}`, m.mode + (m.mode_forced ? ' (khoá do scenario)' : ''), `max_steps ${m.max_steps}`, m.fail && 'fail', m.bonus && 'bonus', m.case_id && `case ${m.case_id}`].filter(Boolean).join(' · ');
 
 // ================================================================ app state
 const state = {config: null, versions: null, rerun: null, runs: [], opts: null, pending: null, jobs: [], evalFiles: [], local: {}};
@@ -302,13 +328,13 @@ const PRESETS = {
   'Lặp mãi (chạm max_steps)': Array.from({length: 8}, (_, i) => ({calls: [{name: 'get_status', arguments: {provider: i % 2 ? 'cloudflare' : 'github'}}], usage: U(400 + i * 300, 20)})),
 };
 function defaultOpts() {
-  return {version: WIP, provider: '', model: '', mode: 'snapshot', max_steps: 6, fail: false, bonus: false, preset: Object.keys(PRESETS)[0], script: null};
+  return {version: WIP, scenario: 'normal', case_id: null, provider: '', model: '', mode: 'snapshot', max_steps: 6, fail: false, bonus: false, preset: Object.keys(PRESETS)[0], script: null};
 }
 function saveOpts() { store.set('sal.opts', state.opts); renderOptsSummary(); }
 function renderOptsSummary() {
   const o = state.opts;
   const prov = o.provider === 'fake' ? `fake: ${o.script ? 'tự sửa' : o.preset}` : (o.provider || `env (${state.config?.provider || '?'})`);
-  $('#opts-summary').textContent = [o.version && o.version !== WIP && `⎇ ${o.version}`, prov, o.mode, `max_steps ${o.max_steps}`, o.fail && 'fail', o.bonus && 'bonus'].filter(Boolean).join(' · ');
+  $('#opts-summary').textContent = [o.version && o.version !== WIP && `⎇ ${o.version}`, o.case_id && `case ${o.case_id}`, o.scenario && o.scenario !== 'normal' && `⚑ ${o.scenario}`, prov, o.mode, `max_steps ${o.max_steps}`, o.fail && 'fail', o.bonus && 'bonus'].filter(Boolean).join(' · ');
 }
 function syncOptsForm() {
   const o = state.opts;
@@ -317,6 +343,28 @@ function syncOptsForm() {
   $('#o-provider').value = o.provider;
   $('#o-model').value = o.model;
   $('#o-steps').value = o.max_steps;
+  // scenario: danh sách theo bonus; scenario lạ -> normal
+  const dataset = o.bonus ? 'bonus' : 'core';
+  if (!scnList(o.bonus).some((x) => x.name === o.scenario)) o.scenario = 'normal';
+  $('#o-scenario').innerHTML = scnList(o.bonus).map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('');
+  $('#o-scenario').value = o.scenario;
+  $('#o-scenario-desc').textContent = scnDesc(o.scenario, o.bonus);
+  // ScenarioTools (bộ chính, scenario khác normal) luôn chạy snapshot
+  const locked = !o.bonus && o.scenario !== 'normal';
+  if (locked) o.mode = 'snapshot';
+  $$('#o-mode button').forEach((b) => { b.disabled = locked && b.dataset.v === 'live'; });
+  $('#o-mode-note').classList.toggle('hidden', !locked);
+  // BonusTools không có fail
+  if (o.bonus) o.fail = false;
+  $('#o-fail').disabled = o.bonus;
+  $('#o-fail-row').title = o.bonus ? 'BonusTools không hỗ trợ fail; dùng scenario rate_limit_* để giả lập lỗi.' : '';
+  // case eval
+  const cases = (state.cases || {})[dataset] || [];
+  if (o.case_id && !cases.some((c) => c.id === o.case_id) && cases.length) o.case_id = null;
+  $('#o-case').innerHTML = `<option value="">— chọn case (${o.bonus ? 'bonus/cases.json' : 'evals/cases.json'}) —</option>` +
+    cases.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.scenario)}${c.fail ? ' · fail' : ''} — ${esc(String(c.question || '').slice(0, 70))}</option>`).join('');
+  $('#o-case').value = o.case_id || '';
+  renderCaseRef();
   $('#o-fail').checked = o.fail; $('#o-bonus').checked = o.bonus;
   $('#o-preset').value = o.script ? '__custom' : o.preset;
   $$('#o-mode button').forEach((b) => b.classList.toggle('on', b.dataset.v === o.mode));
@@ -341,13 +389,37 @@ function setupOptions() {
   $('#o-model').addEventListener('input', (e) => { state.opts.model = e.target.value.trim(); saveOpts(); });
   $('#o-steps').addEventListener('input', (e) => { state.opts.max_steps = Math.max(1, Math.min(50, Number(e.target.value) || 6)); saveOpts(); });
   $('#o-fail').addEventListener('change', (e) => { state.opts.fail = e.target.checked; saveOpts(); });
-  $('#o-bonus').addEventListener('change', (e) => { state.opts.bonus = e.target.checked; saveOpts(); });
+  $('#o-bonus').addEventListener('change', async (e) => {
+    state.opts.bonus = e.target.checked; state.opts.case_id = null;
+    await loadCases(state.opts.bonus ? 'bonus' : 'core'); syncOptsForm(); saveOpts();
+  });
+  $('#o-scenario').addEventListener('change', (e) => { state.opts.scenario = e.target.value; syncOptsForm(); saveOpts(); });
+  $('#o-case').addEventListener('change', (e) => applyCase(e.target.value));
   $$('#o-mode button').forEach((b) => b.addEventListener('click', () => { state.opts.mode = b.dataset.v; syncOptsForm(); saveOpts(); }));
   $('#o-preset').addEventListener('change', (e) => {
     if (e.target.value === '__custom') { openScriptDialog(); return; }
     state.opts.preset = e.target.value; state.opts.script = null; saveOpts();
   });
   $('#o-edit').addEventListener('click', openScriptDialog);
+}
+// Nạp câu hỏi của một case eval: điền câu hỏi, scenario, fail và gợi ý max_steps như eval (8, bonus 16).
+async function applyCase(id) {
+  const o = state.opts, dataset = o.bonus ? 'bonus' : 'core';
+  if (!id) { o.case_id = null; syncOptsForm(); saveOpts(); return; }
+  const c = (await loadCases(dataset)).find((x) => x.id === id);
+  if (!c) return;
+  Object.assign(o, {case_id: c.id, scenario: c.scenario || 'normal', fail: !!c.fail, max_steps: o.bonus ? 16 : 8});
+  q.value = c.question || ''; autoGrow();
+  syncOptsForm(); saveOpts();
+}
+function renderCaseRef() {
+  const box = $('#case-ref');
+  if (!box) return;
+  const c = state.opts.case_id && findCase(state.opts.bonus ? 'bonus' : 'core', state.opts.case_id);
+  box.classList.toggle('hidden', !c);
+  box.innerHTML = c ? caseRefCard(c, true) : '';
+  const x = $('#case-ref-x');
+  if (x) x.addEventListener('click', () => { state.opts.case_id = null; syncOptsForm(); saveOpts(); });
 }
 function currentScript() { return state.opts.script || PRESETS[state.opts.preset] || PRESETS[Object.keys(PRESETS)[0]]; }
 function openScriptDialog() {
@@ -375,7 +447,9 @@ async function ask(question) {
   question = String(question || '').trim();
   if (!question || (state.pending && !state.pending.error)) return;
   const o = state.opts;
-  const body = {question, version: o.version || WIP, mode: o.mode, max_steps: o.max_steps, fail: o.fail, bonus: o.bonus, provider: o.provider, model: o.model};
+  // case_id chỉ gửi khi câu hỏi vẫn đúng là câu hỏi của case (để lịch sử ghi đúng); expected không bao giờ gửi.
+  const linked = o.case_id && findCase(o.bonus ? 'bonus' : 'core', o.case_id);
+  const body = {question, version: o.version || WIP, scenario: o.scenario || 'normal', case_id: linked && linked.question === question ? o.case_id : null, mode: o.mode, max_steps: o.max_steps, fail: o.fail, bonus: o.bonus, provider: o.provider, model: o.model};
   if (o.provider === 'fake') body.fake_script = currentScript();
   q.value = ''; autoGrow();
   $('#opts-pop').classList.add('hidden');
@@ -404,7 +478,7 @@ async function loadRuns() {
 function renderSidebar() {
   const cur = location.hash;
   $('#run-list').innerHTML = state.runs.length ? state.runs.map((r) =>
-    `<a href="#/run/${esc(r.id)}" class="${cur === '#/run/' + r.id ? 'active' : ''}" title="${esc(r.question)}"><span class="dot ${esc(r.status)}"></span><span class="t">${esc(r.question)}</span>${r.version && r.version !== WIP ? `<span class="vtag">${esc(r.version)}</span>` : ''}</a>`).join('')
+    `<a href="#/run/${esc(r.id)}" class="${cur === '#/run/' + r.id ? 'active' : ''}" title="${esc(r.question)}"><span class="dot ${esc(r.status)}"></span><span class="t">${esc(r.question)}</span>${r.scenario && r.scenario !== 'normal' ? `<span class="vtag scn" title="${esc(r.scenario)}">⚑</span>` : ''}${r.version && r.version !== WIP ? `<span class="vtag">${esc(r.version)}</span>` : ''}</a>`).join('')
     : '<div class="small empty">Chưa có lần chạy nào.</div>';
   const section = cur.startsWith('#/eval/results') ? 'eval-results' : cur.startsWith('#/eval/compare') ? 'eval-compare' : cur.startsWith('#/eval') ? 'eval-run' : '';
   $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === section));
@@ -438,8 +512,6 @@ function pageWelcome() {
     <h1>Hỏi agent về trạng thái dịch vụ</h1>
     <p class="small">Agent tự gọi tool <code>get_status</code> / <code>get_incident_details</code> để điều tra GitHub và Cloudflare Status, rồi trả lời kèm nguồn.</p>
     <div class="suggest">${samples.map(([k, s]) => `<button data-q="${esc(s)}"><span class="k">${esc(k)}</span>${esc(s)}</button>`).join('')}</div>
-    <div class="gloss-card"><b>Chú giải nhanh</b>
-      <dl>${Object.entries(TERMS).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></div>
   </div>`;
   $$('.suggest button', view).forEach((b) => b.addEventListener('click', () => ask(b.dataset.q)));
   q.focus();
@@ -464,7 +536,10 @@ async function pageRun(id) {
     if (my !== routeSeq) return; setTitle('Không tìm thấy'); view.innerHTML = `<div class="narrow"><div class="errcard">Không tìm thấy lần chạy này (server có thể đã khởi động lại).</div></div>`; return; }
   if (my !== routeSeq) return;  // người dùng đã chuyển trang trong lúc chờ
   setTitle(rec.question.slice(0, 80));
-  view.innerHTML = `<div class="narrow">${conversation(rec.ok ? {question: rec.question, result: rec.result, meta: rec.meta, elapsed: rec.elapsed}
+  const cid = rec.meta?.case_id;
+  const linked = cid ? (await loadCases(rec.meta.bonus ? 'bonus' : 'core')).find((c) => c.id === cid) : null;
+  if (my !== routeSeq) return;
+  view.innerHTML = `<div class="narrow">${linked ? caseRefCard(linked, false) : ''}${conversation(rec.ok ? {question: rec.question, result: rec.result, meta: rec.meta, elapsed: rec.elapsed}
     : {question: rec.question, exception: rec.exception, traceback: rec.traceback || rec.raw, meta: rec.meta})}</div>`;
 }
 
@@ -479,13 +554,41 @@ async function startEval(body) {
 }
 const defaultOutput = (v) => `eval_${v || WIP}.json`;
 let jobTimer = null;
+// Job eval được lưu trong localStorage của trình duyệt, nên khởi động lại server vẫn còn danh sách.
+// Server là nguồn sự thật khi còn biết job; job server không còn biết mà đang "running" -> "lost".
+const JOBS_KEY = 'sal.jobs', JOBS_HIDDEN_KEY = 'sal.jobs.hidden', JOBS_MAX = 60, JOB_LOG_KEEP = 120;
+function mergeJobs(serverJobs) {
+  const saved = store.get(JOBS_KEY, []);
+  const hidden = new Set(store.get(JOBS_HIDDEN_KEY, []));
+  const byId = new Map((Array.isArray(saved) ? saved : []).filter((j) => isObj(j) && j.id).map((j) => [j.id, j]));
+  const live = new Set();
+  for (const j of serverJobs || []) {
+    live.add(j.id);
+    byId.set(j.id, {...j, log: (j.log || []).slice(-JOB_LOG_KEEP), saved_at: Date.now() / 1000});
+  }
+  for (const j of byId.values()) {
+    j.from_server = live.has(j.id);
+    if (!j.from_server && j.status === 'running') j.status = 'lost';  // server đã restart khi job đang chạy
+  }
+  const all = [...byId.values()].sort((a, b) => b.started - a.started).slice(0, JOBS_MAX);
+  store.set(JOBS_KEY, all);
+  return all.filter((j) => !hidden.has(j.id));
+}
+const shortTime = (sec) => { const d = new Date(sec * 1000), p = (n) => String(n).padStart(2, '0'); return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+function forgetJob(id) {
+  store.set(JOBS_KEY, store.get(JOBS_KEY, []).filter((j) => j.id !== id));
+  store.set(JOBS_HIDDEN_KEY, [...new Set([...store.get(JOBS_HIDDEN_KEY, []), id])].slice(-200));  // job server còn giữ cũng không hiện lại
+}
 async function loadJobs() {
-  try { state.jobs = await api('/api/eval/jobs'); } catch (e) { /* giữ nguyên */ }
+  let server = null;
+  try { server = await api('/api/eval/jobs'); } catch (e) { /* server tắt: vẫn hiện job đã lưu */ }
+  state.jobs = mergeJobs(server || []);
+  state.serverDown = server === null;
   renderSidebar();
   clearTimeout(jobTimer);
   if (state.jobs.some((j) => j.status === 'running')) jobTimer = setTimeout(async () => { await loadJobs(); if (location.hash === '#/eval') renderJobs(); }, 2000);
 }
-const JOB_TEXT = {running: 'đang chạy', done: 'xong', failed: 'lỗi', stopped: 'đã dừng'};
+const JOB_TEXT = {running: 'đang chạy', done: 'xong', failed: 'lỗi', stopped: 'đã dừng', lost: 'mất theo dõi'};
 // Model agent / judge / max_steps của job, lấy từ lúc khởi chạy (server ghi lại), đối chiếu config trong file output.
 function jobSettings(j) {
   const st = j.settings;
@@ -511,21 +614,34 @@ function renderJobs() {
   const box = $('#jobs');
   if (!box) return;
   const open = new Set($$('details[data-job][open]', box).map((d) => d.dataset.job));
-  box.innerHTML = state.jobs.length ? state.jobs.map((j) => {
-    const secs = Math.round((j.finished || Date.now() / 1000) - j.started);
+  const fileInfo = (name) => state.evalFiles.find((f) => f.name === name);
+  const head = state.jobs.length ? `<div class="row small" style="margin-bottom:8px">
+      <span>${state.jobs.length} job, lưu trong trình duyệt này${state.serverDown ? ' · <b style="color:var(--bad)">không kết nối được server</b>' : ''}</span>
+      <span style="flex:1"></span><button class="ghost" id="jobs-clear">Xoá các job đã xong khỏi danh sách</button></div>` : '';
+  box.innerHTML = head + (state.jobs.length ? state.jobs.map((j) => {
+    const secs = Math.round((j.finished || (j.status === 'lost' ? j.saved_at : null) || Date.now() / 1000) - j.started);
+    const f = fileInfo(j.output);
+    const lostNote = j.status === 'lost'
+      ? `<div class="warncard" style="margin:8px 0 0">Server đã khởi động lại khi job đang chạy nên không còn theo dõi được tiến độ. ${f && f.mtime >= j.started
+        ? `File <code>${esc(j.output)}</code> đã được ghi lúc ${esc(new Date(f.mtime * 1000).toLocaleString('vi-VN'))}, có thể job đã chạy xong.`
+        : `Chưa thấy file <code>${esc(j.output)}</code> mới; job có thể đã bị dừng cùng server.`}</div>` : '';
     const done = j.log.filter((l) => /^[A-Z]+\d+: /.test(l)).length;
-    const last = [...j.log].reverse().find((l) => /^Điểm|^Lỗi|error/i.test(l));
+    const last = [...(j.log || [])].reverse().find((l) => /^Điểm|^Lỗi|error/i.test(l));
     return `<div class="job"><div class="row">
         <span class="badge ${esc(j.status)}">● ${esc(JOB_TEXT[j.status] || j.status)}</span>
         <b>${esc(j.output)}</b>
         <span class="small">${j.case ? 'case ' + esc(j.case) : 'toàn bộ'}${j.bonus ? ' · bonus' : ''} · ${secs}s · ${done} case đã chấm${j.returncode !== null ? ' · exit ' + j.returncode : ''}</span>
         <span style="flex:1"></span>
-        ${j.status === 'running' ? `<button class="ghost" data-stop="${esc(j.id)}">Dừng</button>` : `<a class="ghost" style="text-decoration:none" href="#/eval/results/${encodeURIComponent(j.output)}">Xem kết quả →</a>`}
+        <span class="small" title="${esc(new Date(j.started * 1000).toLocaleString('vi-VN'))}">${esc(shortTime(j.started))}</span>
+        ${j.status === 'running' ? `<button class="ghost" data-stop="${esc(j.id)}">Dừng</button>` : `${f ? `<a class="ghost" style="text-decoration:none" href="#/eval/results/${encodeURIComponent(j.output)}">Xem kết quả →</a>` : ''}<button class="ghost icon-x" data-forget="${esc(j.id)}" title="Xoá job này khỏi danh sách (không xoá file kết quả)">×</button>`}
       </div>
-      ${jobSettings(j)}
+      ${jobSettings(j)}${lostNote}
       ${last ? `<div class="small" style="margin-top:6px">${esc(last)}</div>` : ''}
-      <details data-job="${esc(j.id)}" ${open.has(j.id) || j.status === 'running' ? 'open' : ''}><summary class="small" style="cursor:pointer;margin-top:6px">Log (${j.log.length} dòng)</summary><pre>${esc(j.log.slice(-200).join('\n') || '(chưa có output)')}</pre></details></div>`;
-  }).join('') : '<p class="small">Chưa có job nào trong phiên này.</p>';
+      <details data-job="${esc(j.id)}" ${open.has(j.id) || j.status === 'running' ? 'open' : ''}><summary class="small" style="cursor:pointer;margin-top:6px">Log (${(j.log || []).length} dòng${j.from_server ? '' : ', bản đã lưu'})</summary><pre>${esc((j.log || []).slice(-200).join('\n') || '(chưa có output)')}</pre></details></div>`;
+  }).join('') : '<p class="small">Chưa có job nào. Danh sách job được lưu trong trình duyệt này nên vẫn còn sau khi khởi động lại server.</p>');
+  $$('[data-forget]', box).forEach((b) => b.addEventListener('click', () => { forgetJob(b.dataset.forget); state.jobs = state.jobs.filter((j) => j.id !== b.dataset.forget); renderJobs(); }));
+  const clear = $('#jobs-clear');
+  if (clear) clear.addEventListener('click', () => { state.jobs.filter((j) => j.status !== 'running').forEach((j) => forgetJob(j.id)); state.jobs = state.jobs.filter((j) => j.status === 'running'); renderJobs(); });
   $$('[data-stop]', box).forEach((b) => b.addEventListener('click', async () => { try { await api('/api/eval/stop', {id: b.dataset.stop}); } catch (e) { alert(e.message); } await loadJobs(); renderJobs(); }));
 }
 function pageEvalRun() {
@@ -556,7 +672,7 @@ function pageEvalRun() {
       </details>
       <div class="row" style="margin-top:14px"><button class="primary" id="e-start">▶ Bắt đầu</button><span class="small" id="e-msg"></span></div>
     </form>
-    <h3 style="margin:22px 0 10px">Các job trong phiên</h3><div id="jobs"></div></div>`;
+    <h3 style="margin:22px 0 10px">Các job eval</h3><div id="jobs"></div></div>`;
   let scope = 'full', outputTouched = false;
   $('#e-output').addEventListener('input', () => { outputTouched = true; });
   $('#e-version').addEventListener('change', (e) => { if (!outputTouched) $('#e-output').value = defaultOutput(e.target.value); });
@@ -573,7 +689,7 @@ function pageEvalRun() {
     try { const j = await startEval(body); $('#e-msg').textContent = `Đã bắt đầu → ${j.output}`; await loadJobs(); renderJobs(); }
     catch (err) { $('#e-msg').innerHTML = `<span class="badge error">lỗi</span> ${esc(err.message)}`; }
   });
-  renderJobs(); loadJobs().then(renderJobs);
+  renderJobs(); Promise.all([loadJobs(), loadEvalFiles()]).then(renderJobs);
 }
 
 // ---------------------------------------------------------------- eval: files
@@ -988,8 +1104,11 @@ window.addEventListener('hashchange', route);
   catch (e) { state.config = {provider: '', model: '', providers: [], keys_present: {}}; }
   const keys = Object.entries(state.config.keys_present).filter(([, v]) => v).map(([k]) => k.replace('_API_KEY', '').toLowerCase());
   $('#envinfo').innerHTML = `env: <b>${esc(state.config.provider || '—')}</b> / ${esc(state.config.model || '—')}<br>key: ${esc(keys.join(', ') || 'không có — dùng fake provider')}`;
+  try { state.scenarios = await api('/api/scenarios'); } catch (e) { state.scenarios = null; }
   try { state.versions = await api('/api/versions'); }
   catch (e) { state.versions = [{name: WIP, label: 'Bản đang sửa (working copy)'}]; }
+  const savedOpts = store.get('sal.opts', {});
+  await loadCases(savedOpts && savedOpts.bonus ? 'bonus' : 'core');
   setupOptions();
   await Promise.all([loadRuns(), loadJobs()]);
   route();

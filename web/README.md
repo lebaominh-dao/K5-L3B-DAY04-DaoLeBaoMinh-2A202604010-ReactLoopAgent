@@ -23,6 +23,8 @@ python3 web/server.py --port 8765
   - `fail` (giả lập tool timeout)
   - `bonus` (dùng `BonusTools`)
   - **version agent**: bản đang sửa (working copy) hoặc một git tag (`v0`, `v1`…), xem mục [Version agent](#version-agent-git-tag)
+  - **scenario**: tình huống chèn lỗi giống eval, xem mục [Scenario và case eval](#scenario-và-case-eval)
+  - **Dùng câu hỏi của case…**: nạp câu hỏi của một case eval
 - **Fake provider** không cần key. Agent nhận các câu trả lời "model" lấy từ một kịch bản JSON, giống `FakeProvider` trong `tests/test_lab.py`. Chọn kịch bản mẫu hoặc bấm **Sửa…** để tự viết. Có sẵn:
   - một tool
   - nhiều tool + incident
@@ -37,11 +39,27 @@ python3 web/server.py --port 8765
   - Tool lỗi (`ok: false`, `INVALID_ARGUMENTS`, timeout) có màu đỏ. `max_steps` và event lạ (ví dụ `validation_missing_source`) có màu vàng.
   - Câu trả lời render markdown đơn giản: in đậm, `code`, danh sách, link bấm được, bảng GFM (có căn lề; bảng rộng cuộn ngang trong khung riêng).
   - Badge trạng thái: `completed` xanh, `max_steps` vàng, `error` / `exception` đỏ. Exception hiện kèm traceback thu gọn.
-  - Badge `⎇ v0` / `⎇ working copy` cho biết câu trả lời đến từ version agent nào (sidebar cũng ghi tag cạnh mỗi lần chạy).
+  - Badge `⎇ v0` / `⎇ working copy` cho biết câu trả lời đến từ version agent nào (sidebar cũng ghi tag cạnh mỗi lần chạy). Badge `⚑ status_injection` cho biết scenario.
+  - Tool result có trường do scenario chèn vào (`external_notice`, `context_note`, `distractors`, update `untrusted`) được tô vàng ngay trên dòng tool, ví dụ `overall none · 5 incident · ⚠ có external_notice`.
   - Dòng **"▦ … tokens · … lần gọi model · … tool call"**: bấm vào để xem bảng usage từng step. Bảng đọc được cả format OpenAI (`prompt_tokens` / `completion_tokens`) và Anthropic (`input_tokens` / `output_tokens`).
-- Rê chuột lên các thuật ngữ có gạch chấm (step, finish, tool call, max_steps…) để xem giải thích. Màn hình chào có bảng chú giải.
+- Rê chuột lên các thuật ngữ có gạch chấm (step, finish, tool call, max_steps…) để xem giải thích.
 - Sidebar trái là lịch sử các lần chạy trong phiên server. Lịch sử lưu trong bộ nhớ, mất khi tắt server.
 - Nút cuối sidebar đổi giao diện: tự động / sáng / tối.
+
+## Scenario và case eval
+
+Chọn trong menu ⚙ của chat để tái hiện đúng tình huống eval khi demo.
+
+| Bộ | Tools | Scenario |
+|---|---|---|
+| Chính (không bật bonus) | `ScenarioTools(scenario, fail)` từ `evals/scenarios.py` (chỉ import, không sửa) | `normal`, `cloudflare_timeout`, `injection`, `status_injection`, `noisy_status` |
+| Bonus | `BonusTools(mode, scenario=...)` | `normal`, `rate_limit_once`, `rate_limit_always`, `format_once`, `noisy`, `injection` |
+
+- Danh sách scenario đổi theo ô bonus; mỗi giá trị có mô tả ngắn ngay dưới ô chọn. Server chỉ nhận giá trị trong whitelist.
+- `ScenarioTools` luôn chạy snapshot, nên với bộ chính, scenario khác `normal` sẽ khoá mode ở `snapshot` (có ghi chú trong menu). `normal` + `live` vẫn dùng `StatusTools` gọi API thật.
+- Bonus không có `fail` (ô bị khoá); dùng `rate_limit_*` để giả lập lỗi.
+- **Dùng câu hỏi của case…** đọc `evals/cases.json`, hoặc `bonus/cases.json` khi bật bonus. Chọn một case thì điền sẵn câu hỏi, scenario, `fail` và `max_steps` như eval (8, bonus 16). Một thẻ phía trên ô nhập hiện `expected` thu gọn để đối chiếu; `expected` **không** được gửi cho agent.
+- Nếu gửi đúng câu hỏi của case, lịch sử run ghi lại `case_id`, nên mở lại hội thoại vẫn thấy thẻ `expected`.
 
 ## Eval (sidebar → Eval)
 
@@ -51,6 +69,7 @@ python3 web/server.py --port 8765
   - Nếu file output đã tồn tại, UI hỏi trước khi ghi đè; không bao giờ tự ghi đè.
   - Trong "Tùy chọn nâng cao" chỉnh được provider/model của agent, judge provider / judge model (để trống = dùng model agent), `max_steps`, `workers`.
   - Có trạng thái đang chạy / xong / lỗi, log, và nút dừng.
+  - Danh sách job (kèm cấu hình và 120 dòng log cuối) được **lưu trong trình duyệt** (`localStorage`), nên khởi động lại server vẫn còn. Job đang chạy mà server khởi động lại sẽ hiện "mất theo dõi", kèm cho biết file output đã được ghi sau lúc bắt đầu hay chưa. Nút × xoá một job khỏi danh sách; "Xoá các job đã xong" dọn cả danh sách. Cả hai không xoá file kết quả. Lưu theo từng trình duyệt, tối đa 60 job.
   - Mỗi job hiện **version** (tag + commit), **model agent**, **model judge** và `max_steps` đúng như lúc khởi chạy (tính giống `run_evals.py`: tham số > biến môi trường > mặc định). Nếu không chọn judge, `run_evals.py` dùng chính model agent để chấm; UI ghi rõ "(mặc định = agent)". Khi job xong, cấu hình này được đối chiếu với `config` trong file output.
   - Eval gọi model thật nên cần key.
 - **Kết quả eval:**
@@ -91,7 +110,9 @@ git worktree remove .versions/v0
 |---|---|---|
 | GET | `/api/config` | provider/model từ env, key nào có (true/false) |
 | GET | `/api/versions` | `wip` + các git tag (tên, commit, ngày, message) |
-| POST | `/api/run` | chạy agent; body: `question, version, provider, model, mode, max_steps, fail, bonus, fake_script` |
+| GET | `/api/scenarios` | scenario hợp lệ + mô tả cho bộ chính và bonus |
+| GET | `/api/cases?dataset=core\|bonus` | id, câu hỏi, scenario, fail, expected của các case eval |
+| POST | `/api/run` | chạy agent; body: `question, version, scenario, case_id, provider, model, mode, max_steps, fail, bonus, fake_script` |
 | GET | `/api/runs`, `/api/runs/<id>` | lịch sử chạy trong phiên |
 | POST | `/api/eval/start`, `/api/eval/stop` | chạy / dừng eval; `version` chọn tag. File output đã tồn tại → 409, gửi lại với `overwrite: true` sau khi người dùng xác nhận |
 | GET | `/api/eval/jobs` | trạng thái và log các job eval |

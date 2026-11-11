@@ -37,6 +37,7 @@
     <div class="view" id="view"></div>
 
     <div class="composer-wrap" id="composer-wrap">
+      <div class="case-ref hidden" id="case-ref"></div>
       <form class="composer" id="composer">
         <textarea id="q" rows="1" placeholder="Hỏi về trạng thái GitHub / Cloudflare…  (Enter để gửi, Shift+Enter xuống dòng)"></textarea>
         <div class="composer-bar">
@@ -45,6 +46,9 @@
         </div>
         <div class="popover hidden" id="opts-pop">
           <div class="pop-title">Tùy chọn lần chạy</div>
+          <label class="field"><span>Dùng câu hỏi của case… <span class="term" data-tip="Điền sẵn câu hỏi, scenario và fail theo một case trong evals/cases.json (hoặc bonus/cases.json khi bật bonus). expected chỉ hiện để đối chiếu, không gửi cho agent.">?</span></span>
+            <select id="o-case"></select>
+          </label>
           <label class="field">Provider
             <select id="o-provider"></select>
           </label>
@@ -58,13 +62,18 @@
             <span>Kịch bản giả <span class="term" data-tip="Fake provider không gọi model thật: mỗi phần tử trong kịch bản là một câu trả lời của 'model'. Không cần API key.">?</span></span>
             <div class="row"><select id="o-preset"></select><button type="button" class="ghost" id="o-edit">Sửa…</button></div>
           </div>
+          <label class="field"><span>Scenario <span class="term" data-tip="Tình huống chèn lỗi giống eval. Bộ chính dùng ScenarioTools (evals/scenarios.py), bonus dùng BonusTools(mode, scenario). Danh sách đổi theo trạng thái bonus.">?</span></span>
+            <select id="o-scenario"></select>
+            <span class="small" id="o-scenario-desc"></span>
+          </label>
           <div class="field"><span>Dữ liệu <span class="term" data-tip="snapshot: đọc dữ liệu đã chụp sẵn trong fixtures/ (ổn định, offline). live: gọi status API thật.">?</span></span>
             <div class="seg" id="o-mode"><button type="button" data-v="snapshot">snapshot</button><button type="button" data-v="live">live</button></div>
+            <span class="small hidden" id="o-mode-note">Scenario khác <code>normal</code> dùng ScenarioTools, luôn chạy trên snapshot nên khoá ở snapshot.</span>
           </div>
           <label class="field"><span>max_steps <span class="term" data-tip="Số lần gọi model tối đa. Hết mà chưa có câu trả lời cuối thì dừng với trạng thái max_steps.">?</span></span>
             <input id="o-steps" type="number" min="1" max="50">
           </label>
-          <label class="check"><input type="checkbox" id="o-fail"> Giả lập tool timeout (fail)</label>
+          <label class="check" id="o-fail-row"><input type="checkbox" id="o-fail"> Giả lập tool timeout (fail)</label>
           <label class="check"><input type="checkbox" id="o-bonus"> Dùng BonusTools (bonus)</label>
         </div>
       </form>
