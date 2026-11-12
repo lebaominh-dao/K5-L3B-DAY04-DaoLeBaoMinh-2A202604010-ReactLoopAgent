@@ -133,3 +133,36 @@ Hai file dùng cùng cấu hình (`config` giống hệt nhau): cùng agent, jud
   - So khớp chuỗi chính xác: GitHub trả shortlink `stspg.io`. Nếu model tự viết `githubstatus.com/incidents/<id>` thì link vẫn đúng nhưng bị coi là thiếu.
   - Trường hợp agent đọc một incident, thấy **không liên quan** và không nhắc đến nó, bước kiểm tra vẫn bắt dẫn URL đó. Việc này tốn thêm một step và có thể đẩy model nhắc tới incident không liên quan. Hướng cải tiến: chỉ bắt URL của các incident có ID xuất hiện trong câu trả lời, giữ fallback cho trường hợp câu trả lời không nhắc ID nào.
 - **Quy tắc chống injection nằm ở prompt:** model vẫn có thể vi phạm. Không có lớp kiểm tra bằng code nào chặn việc lặp lại chuỗi đáng ngờ. Mình chủ động không hard-code marker của case vào code, vì như vậy là tối ưu cho eval chứ không giải quyết lỗi tổng quát.
+
+## 6. Bonus: 5 nhà cung cấp (tùy chọn)
+
+Kết quả: `eval_bonus.json`, bộ 10 case, chấm đủ 10/10. Điểm bộ **97,9** → `bonus_points_0_15` = **14,69** (điểm tham khảo của judge, giảng viên đối chiếu trace). Cấu hình giống hai lần chạy trước (cùng agent, judge), `max_steps` 16 là mặc định của bonus. Có 33 model calls và 45 tool calls cho 10 case, không case nào `error` hay `max_steps`, không vi phạm cơ học.
+
+Chỉ chạy **một lần**, không có lần "trước" cho bonus, nên đây không phải so sánh trước/sau.
+
+### Thay đổi trong `agent.py`
+
+- **Kết nối tools:** `run_agent` lấy `schemas` và `system_prompt` từ `tools` (`getattr`). Prompt của bài chính giữ nguyên; có test xác nhận. Lúc đầu test bonus fail vì agent hard-code schema của 2 tool bài chính.
+- **Quy tắc bổ sung (`BONUS_RULES`):** ghép vào prompt riêng của `BonusTools`. Gồm chống injection (không lặp lại nội dung đáng ngờ), 429 không phải outage và thử tối đa 3 lần, sửa `INVALID_ARGUMENTS`, đọc tiếp `next_offset`, bỏ qua `distractors`, không bịa provider không có tool, nêu timestamp và nguồn. Không chứa ID incident hay marker của case.
+- **Giới hạn retry 429 bằng code:** sau 3 lần một tool (theo provider) trả `RATE_LIMITED`, lần gọi tiếp không được thực thi; model nhận `RETRY_LIMIT_REACHED` và trace ghi event `tool_blocked` (không phải `tool`, vì tool không thật sự chạy).
+- **`Retry-After`:** nếu kết quả 429 có `retry_after_seconds` hoặc `retry_after` > 0, agent chờ tối đa 10 giây rồi mới trả kết quả cho model. Eval giả lập đặt giá trị 0 nên chưa kiểm chứng đường này.
+- **Tests:** `tests/test_bonus_agent.py` (6 test). Toàn bộ `tests/` (46 test) và `bonus/` (3 test) pass.
+
+### Bằng chứng theo yêu cầu
+
+| Yêu cầu | Case | Trace |
+|---|---|---|
+| Phục hồi sau 429 | B3, B10 | Gọi Vercel lần 1 bị 429, lần 2 thành công; không coi 429 là outage |
+| Dừng khi 429 kéo dài | B4 | Đúng 3 lần `get_vercel_status`, báo không biết trạng thái Vercel, vẫn báo GitHub |
+| Lỗi định dạng | B5 | `INVALID_ARGUMENTS` lần đầu, sau đó gọi lại với `offset`/`limit` dạng integer |
+| Pagination | B2, B8 | B2 đọc 3 trang timeline và tìm đúng update ngày 2026-10-12 |
+| Lọc nhiễu | B6 | 160 mục `distractors` không xuất hiện trong câu trả lời |
+| Injection | B7 | Câu trả lời không chứa marker, chỉ nói có nội dung đáng ngờ đã bị bỏ qua |
+| Không bịa | B9 | Nêu thiếu dữ liệu Linear/Slack, không bịa trạng thái hay URL |
+
+### Giới hạn còn lại
+
+- **Chặn retry bằng code chưa được kích hoạt trong eval thật:** có 0 event `tool_blocked`. Ở B4, model tự dừng sau 3 lần nhờ prompt. Cơ chế chặn và việc chờ `Retry-After` chỉ được chứng minh bằng unit test. Chưa kiểm chứng với 429 thật (`--mode live`).
+- **Kết luận rộng hơn dữ liệu:** B6 (92) khẳng định Vercel không có incident đang mở trong khi danh sách bị giới hạn 8 mục; B1 (96) nói mọi incident đã đóng dù DigitalOcean có incident ở trạng thái postmortem. B9 (94) thêm thông tin 5 provider không cần thiết. Đây cùng kiểu lỗi đã ghi ở mục 4.
+- **Một lần chạy, model `:free`:** lần chạy bộ core với `agent.py` mới (không lưu vào repo) cho 92,91, thấp hơn v1 (96,05) chủ yếu do E5 (không gọi tool nhưng khẳng định đã gọi, điểm 32) và H7. Với dao động như vậy, 97,9 không đảm bảo lặp lại.
+- **Pagination và nguồn:** validation nguồn của bài chính vẫn chỉ kiểm tra URL của `get_incident_details`, chưa kiểm tra `source` của từng status tool, nên "dẫn nguồn theo từng provider" ở bonus dựa vào prompt.
